@@ -12,6 +12,10 @@ class SamsungNote {
   DateTime updatedAt;
   bool isPinned;
   bool hasDrawing;
+  List<String> imagePaths;
+  String? pdfPath;
+  String? audioPath;
+  List<Map<String, dynamic>> drawingStrokes;
 
   SamsungNote({
     String? id,
@@ -22,6 +26,10 @@ class SamsungNote {
     DateTime? updatedAt,
     this.isPinned = false,
     this.hasDrawing = false,
+    this.imagePaths = const [],
+    this.pdfPath,
+    this.audioPath,
+    this.drawingStrokes = const [],
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
@@ -35,6 +43,10 @@ class SamsungNote {
         'updatedAt': updatedAt.toIso8601String(),
         'isPinned': isPinned ? 1 : 0,
         'hasDrawing': hasDrawing ? 1 : 0,
+        'imagePaths': jsonEncode(imagePaths),
+        'pdfPath': pdfPath ?? '',
+        'audioPath': audioPath ?? '',
+        'drawingStrokes': jsonEncode(drawingStrokes),
       };
 
   factory SamsungNote.fromMap(Map<String, dynamic> map) => SamsungNote(
@@ -46,15 +58,31 @@ class SamsungNote {
         updatedAt: DateTime.parse(map['updatedAt']),
         isPinned: (map['isPinned'] ?? 0) == 1,
         hasDrawing: (map['hasDrawing'] ?? 0) == 1,
+        imagePaths: map['imagePaths'] != null && map['imagePaths'].isNotEmpty
+            ? List<String>.from(jsonDecode(map['imagePaths']))
+            : [],
+        pdfPath: (map['pdfPath'] != null && map['pdfPath'].isNotEmpty) ? map['pdfPath'] : null,
+        audioPath: (map['audioPath'] != null && map['audioPath'].isNotEmpty) ? map['audioPath'] : null,
+        drawingStrokes: map['drawingStrokes'] != null && map['drawingStrokes'].isNotEmpty
+            ? List<Map<String, dynamic>>.from(jsonDecode(map['drawingStrokes']))
+            : [],
       );
 }
 
-class NoteService {
+class NoteService extends ChangeNotifier {
   List<SamsungNote> _notes = [];
   Set<String> _folders = {'기본'};
 
   List<SamsungNote> get notes => List.unmodifiable(_notes);
   Set<String> get folders => Set.unmodifiable(_folders);
+
+  List<SamsungNote> search(String query) {
+    final q = query.toLowerCase();
+    return _notes.where((n) =>
+        n.title.toLowerCase().contains(q) ||
+        n.content.toLowerCase().contains(q)).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  }
 
   List<SamsungNote> get pinnedNotes =>
       _notes.where((n) => n.isPinned).toList()
@@ -70,6 +98,7 @@ class NoteService {
 
   void addNote(SamsungNote note) {
     _notes.insert(0, note);
+    notifyListeners();
     _saveNotes();
   }
 
@@ -81,23 +110,27 @@ class NoteService {
       if (folder != null) _notes[idx].folder = folder;
       if (isPinned != null) _notes[idx].isPinned = isPinned;
       _notes[idx].updatedAt = DateTime.now();
+      notifyListeners();
       _saveNotes();
     }
   }
 
   void deleteNote(String id) {
     _notes.removeWhere((n) => n.id == id);
+    notifyListeners();
     _saveNotes();
   }
 
   void addFolder(String name) {
     _folders.add(name);
+    notifyListeners();
   }
 
   void deleteFolder(String name) {
     if (name == '기본') return;
     _folders.remove(name);
     _notes.removeWhere((n) => n.folder == name);
+    notifyListeners();
     _saveNotes();
   }
 
@@ -115,6 +148,7 @@ class NoteService {
       _notes = data.map((m) => SamsungNote.fromMap(m)).toList();
       _folders = _notes.map((n) => n.folder).toSet();
       _folders.add('기본');
+      notifyListeners();
     }
   }
 }

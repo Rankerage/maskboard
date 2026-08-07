@@ -1,5 +1,5 @@
 name: maskboard
-description: Maskboard - Samsung Notes style note-taking app
+description: Maskboard - Full-featured Samsung Notes style app
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -17,6 +17,13 @@ dependencies:
   sqflite: ^2.3.0
   provider: ^6.1.1
   share_plus: ^7.2.1
+  file_picker: ^6.1.1
+  flutter_pdfview: ^1.3.2
+  image_picker: ^1.0.5
+  record: ^5.0.4
+  audioplayers: ^5.2.1
+  http: ^1.1.0
+  flutter_colorpicker: ^1.0.3
 
 dev_dependencies:
   flutter_test:

@@ -4,39 +4,59 @@ import '../models/note.dart';
 import '../widgets/note_card.dart';
 import 'editor_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final _searchCtrl = TextEditingController();
+  String _query = '';
+  bool _isSearching = false;
 
   @override
   Widget build(BuildContext context) {
     final service = context.watch<NoteService>();
-    final pinned = service.pinnedNotes;
-    final unpinned = service.unpinnedNotes;
+    final results = _query.isNotEmpty ? service.search(_query) : null;
+    final pinned = results ?? service.pinnedNotes;
+    final unpinned = results != null ? [] : service.unpinnedNotes;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF9F9F9),
       appBar: AppBar(
-        title: const Text('Maskboard', style: TextStyle(fontWeight: FontWeight.w600)),
         backgroundColor: Colors.white,
         elevation: 0.5,
+        title: _isSearching
+            ? TextField(
+                controller: _searchCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(hintText: '노트 검색...', border: InputBorder.none),
+                onChanged: (v) => setState(() => _query = v)),
+              )
+            : const Text('Maskboard', style: TextStyle(fontWeight: FontWeight.w600)),
         actions: [
-          IconButton(icon: const Icon(Icons.search), onPressed: () {}),
+          IconButton(
+            icon: Icon(_isSearching ? Icons.close : Icons.search),
+            onPressed: () => setState(() { _isSearching = !_isSearching; _query = ''; _searchCtrl.clear(); }),
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
             onSelected: (v) {
               if (v == 'folder') _showFolderDialog(context, service);
+              if (v == 'sync') _syncToCloud(service);
             },
             itemBuilder: (ctx) => [
               const PopupMenuItem(value: 'folder', child: Text('폴더 관리')),
               const PopupMenuItem(value: 'sort', child: Text('정렬')),
-              const PopupMenuItem(value: 'grid', child: Text('보기 방식')),
+              const PopupMenuItem(value: 'sync', child: Text('클라우드 동기화')),
             ],
           ),
         ],
       ),
       body: Column(
         children: [
-          // 폴더 탭
           Container(
             color: Colors.white,
             child: SingleChildScrollView(
@@ -44,43 +64,42 @@ class HomeScreen extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
               child: Row(
                 children: [
-                  _buildFolderChip(context, '전체', service.notes.length, true),
+                  _buildFolderChip('전체', service.notes.length, _query.isEmpty),
                   for (final folder in service.folders)
-                    _buildFolderChip(context, folder, service.notesInFolder(folder).length, false),
+                    _buildFolderChip(folder, service.notesInFolder(folder).length, false),
                 ],
               ),
             ),
           ),
           const SizedBox(height: 8),
-          // 노트 그리드
           Expanded(
             child: unpinned.isEmpty && pinned.isEmpty
-                ? const Center(
+                ? Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.note_add_outlined, size: 64, color: Colors.grey),
-                        SizedBox(height: 12),
-                        Text('새 노트를 만들어보세요', style: TextStyle(color: Colors.grey, fontSize: 16)),
+                        const Icon(Icons.note_add_outlined, size: 64, color: Colors.grey),
+                        const SizedBox(height: 12),
+                        Text(
+                          _query.isNotEmpty ? '검색 결과 없음' : '새 노트를 만들어보세요',
+                          style: const TextStyle(color: Colors.grey, fontSize: 16),
+                        ),
                       ],
                     ),
                   )
                 : GridView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      childAspectRatio: 0.85,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
+                      crossAxisCount: 2, childAspectRatio: 0.85,
+                      crossAxisSpacing: 10, mainAxisSpacing: 10,
                     ),
                     itemCount: pinned.length + unpinned.length,
                     itemBuilder: (ctx, i) {
                       final note = i < pinned.length ? pinned[i] : unpinned[i - pinned.length];
-                      final isPinned = i < pinned.length;
                       return NoteCard(
                         note: note,
-                        isPinned: isPinned,
-                        onTap: () => _openNote(context, note),
+                        isPinned: i < pinned.length,
+                        onTap: () => _openNote(note),
                         onTogglePin: () => service.updateNote(note.id, isPinned: !note.isPinned),
                         onDelete: () => service.deleteNote(note.id),
                       );
@@ -90,7 +109,7 @@ class HomeScreen extends StatelessWidget {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openNote(context, SamsungNote()),
+        onPressed: () => _openNote(SamsungNote()),
         backgroundColor: const Color(0xFFFFD54F),
         foregroundColor: Colors.black,
         icon: const Icon(Icons.edit),
@@ -99,7 +118,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildFolderChip(BuildContext context, String name, int count, bool selected) {
+  Widget _buildFolderChip(String name, int count, bool selected) {
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: ChoiceChip(
@@ -112,11 +131,8 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  void _openNote(BuildContext context, SamsungNote note) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => EditorScreen(note: note)),
-    );
+  void _openNote(SamsungNote note) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => EditorScreen(note: note)));
   }
 
   void _showFolderDialog(BuildContext context, NoteService service) {
@@ -131,13 +147,7 @@ class HomeScreen extends StatelessWidget {
               ListTile(
                 title: Text(f),
                 trailing: f != '기본'
-                    ? IconButton(
-                        icon: const Icon(Icons.delete, size: 20),
-                        onPressed: () {
-                          service.deleteFolder(f);
-                          Navigator.pop(ctx);
-                        },
-                      )
+                    ? IconButton(icon: const Icon(Icons.delete, size: 20), onPressed: () { service.deleteFolder(f); Navigator.pop(ctx); })
                     : null,
               ),
           ],
@@ -153,22 +163,22 @@ class HomeScreen extends StatelessWidget {
                   content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: '폴더 이름')),
                   actions: [
                     TextButton(onPressed: () => Navigator.pop(_), child: const Text('취소')),
-                    TextButton(
-                      onPressed: () => Navigator.pop(_, ctrl.text),
-                      child: const Text('추가'),
-                    ),
+                    TextButton(onPressed: () => Navigator.pop(_, ctrl.text), child: const Text('추가')),
                   ],
                 ),
               );
-              if (name != null && name.isNotEmpty) {
-                service.addFolder(name);
-                Navigator.pop(ctx);
-              }
+              if (name != null && name.isNotEmpty) { service.addFolder(name); Navigator.pop(ctx); }
             },
             child: const Text('폴더 추가'),
           ),
         ],
       ),
+    );
+  }
+
+  void _syncToCloud(NoteService service) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('HermesA 동기화 준비 중...')),
     );
   }
 }
