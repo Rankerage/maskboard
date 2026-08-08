@@ -10,13 +10,16 @@ class LiveSession extends ChangeNotifier {
   String _username = '';
   bool _connected = false;
   List<String> _participants = [];
+  String _sharedText = '';
 
-  void Function(Map<String, dynamic> stroke)? onStroke;
-  void Function()? onUndo;
-  void Function()? onClear;
-  void Function(String text)? onTextUpdate;
+  // 실시간 콜백
+  void Function(Map<String, dynamic> stroke, String user)? onRemoteStroke;
+  void Function()? onRemoteUndo;
+  void Function()? onRemoteClear;
+  void Function(String text, String user)? onRemoteTextUpdate;
   void Function(String user)? onUserJoined;
   void Function(String user)? onUserLeft;
+  void Function(List<Map<String, dynamic>> strokes, String text)? onInit;
 
   bool get connected => _connected;
   String get roomCode => _roomCode;
@@ -36,9 +39,7 @@ class LiveSession extends ChangeNotifier {
     _roomCode = code;
     _username = username;
     try {
-      _channel = WebSocketChannel.connect(
-        Uri.parse('ws://100.115.250.84:8766/ws/$code/$username'),
-      );
+      _channel = WebSocketChannel.connect(Uri.parse('ws://100.115.250.84:8766/ws/$code/$username'));
       _connected = true;
 
       _channel!.stream.listen(
@@ -47,25 +48,34 @@ class LiveSession extends ChangeNotifier {
           switch (msg['type']) {
             case 'init':
               _participants = List<String>.from(msg['users'] ?? []);
+              final strokes = msg['strokes'] != null ? List<Map<String, dynamic>>.from(msg['strokes']) : <Map<String, dynamic>>[];
+              _sharedText = msg['text'] ?? '';
+              onInit?.call(strokes, _sharedText);
               notifyListeners();
               break;
             case 'stroke':
-              onStroke?.call(msg['stroke']);
+              onRemoteStroke?.call(msg['stroke'], msg['user'] ?? '');
               break;
             case 'undo':
-              onUndo?.call();
+              onRemoteUndo?.call();
               break;
             case 'clear':
-              onClear?.call();
+              onRemoteClear?.call();
               break;
             case 'text_update':
-              onTextUpdate?.call(msg['text']);
+              _sharedText = msg['text'] ?? '';
+              onRemoteTextUpdate?.call(_sharedText, msg['user'] ?? '');
+              notifyListeners();
               break;
             case 'user_joined':
-              onUserJoined?.call(msg['user']);
+              _participants = List<String>.from(msg['users'] ?? []);
+              onUserJoined?.call(msg['user'] ?? '');
+              notifyListeners();
               break;
             case 'user_left':
-              onUserLeft?.call(msg['user']);
+              _participants = List<String>.from(msg['users'] ?? []);
+              onUserLeft?.call(msg['user'] ?? '');
+              notifyListeners();
               break;
           }
         },
@@ -82,18 +92,23 @@ class LiveSession extends ChangeNotifier {
   }
 
   void sendStroke(Map<String, dynamic> stroke) {
+    if (!_connected) return;
     _channel?.sink.add(jsonEncode({"type": "stroke", "stroke": stroke}));
   }
 
   void sendUndo() {
+    if (!_connected) return;
     _channel?.sink.add(jsonEncode({"type": "undo"}));
   }
 
   void sendClear() {
+    if (!_connected) return;
     _channel?.sink.add(jsonEncode({"type": "clear"}));
   }
 
   void sendTextUpdate(String text) {
+    if (!_connected) return;
+    _sharedText = text;
     _channel?.sink.add(jsonEncode({"type": "text_update", "text": text}));
   }
 

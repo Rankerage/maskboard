@@ -9,6 +9,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/note.dart';
 import '../widgets/drawing_canvas.dart';
+import '../services/live_session.dart';
 import 'live_share_screen.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -25,15 +26,16 @@ class _EditorScreenState extends State<EditorScreen> {
   String _selectedFolder = '기본';
   bool _showDrawing = false;
   List<DrawingStroke> _strokes = [];
+  List<DrawingStroke> _remoteStrokes = [];
   final ImagePicker _imagePicker = ImagePicker();
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
   bool _isRecording = false;
   String? _recordingPath;
-  bool _isBold = false;
-  bool _isItalic = false;
-  bool _isUnderline = false;
-  bool _isBullet = false;
+
+  // 라이브 세션
+  LiveSession? _liveSession;
+  String _liveStatus = '';
 
   @override
   void initState() {
@@ -54,6 +56,7 @@ class _EditorScreenState extends State<EditorScreen> {
     _saveNote();
     _titleCtrl.dispose(); _contentCtrl.dispose();
     _recorder.dispose(); _player.dispose();
+    _liveSession?.leaveRoom();
     super.dispose();
   }
 
@@ -94,8 +97,7 @@ class _EditorScreenState extends State<EditorScreen> {
   Future<void> _importPDF() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['pdf']);
     if (result != null) {
-      final path = result.files.single.path!;
-      _contentCtrl.text += '\n[PDF:$path]';
+      _contentCtrl.text += '\n[PDF:${result.files.single.path!}]';
       _saveNote();
     }
   }
@@ -119,34 +121,101 @@ class _EditorScreenState extends State<EditorScreen> {
     if (path.isNotEmpty) _player.play(DeviceFileSource(path));
   }
 
-  void _exportPDF() async {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('PDF 내보내기 준비 중...')));
-  }
-
   void _shareNote() {
     Share.share('${_titleCtrl.text}\n\n${_contentCtrl.text}', subject: _titleCtrl.text);
   }
 
   void _confirmDelete() {
-    showDialog(
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('노트 삭제'), content: const Text('이 노트를 삭제할까요?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
+        TextButton(onPressed: () { context.read<NoteService>().deleteNote(widget.note.id); Navigator.pop(ctx); Navigator.pop(context); },
+          child: const Text('삭제', style: TextStyle(color: Colors.red))),
+      ],
+    ));
+  }
+
+  // ========== 실시간 공유 ==========
+  void _startLiveShare() async {
+    final nameCtrl = TextEditingController(text: '사용자');
+    final codeCtrl = TextEditingController();
+
+    final result = await showModalBottomSheet<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('노트 삭제'),
-        content: const Text('이 노트를 삭제할까요?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
-          TextButton(onPressed: () {
-            context.read<NoteService>().deleteNote(widget.note.id);
-            Navigator.pop(ctx); Navigator.pop(context);
-          }, child: const Text('삭제', style: TextStyle(color: Colors.red))),
-        ],
+      isScrollControlled: true,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('실시간 공유', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: '닉네임', prefixIcon: Icon(Icons.person))),
+            const SizedBox(height: 8),
+            TextField(controller: codeCtrl, decoration: const InputDecoration(labelText: '방 코드 (6자리)', prefixIcon: Icon(Icons.vpn_key), hintText: '빈칸이면 새로 생성')),
+            const SizedBox(height: 16),
+            Row(children: [
+              Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(ctx, 'create'), child: const Text('새로 만들기'))),
+              const SizedBox(width: 12),
+              Expanded(child: FilledButton(onPressed: () => Navigator.pop(ctx, 'join'), child: const Text('참가하기'))),
+            ]),
+          ]),
+        ),
       ),
     );
+
+    if (result == null) return;
+
+    final session = LiveSession();
+    _liveSession = session;
+
+    session.onRemoteStroke = (stroke, user) {
+      setState(() { _remoteStrokes.add(DrawingStroke.fromMap(stroke)); });
+      _showToast('$user 필기');
+    };
+    session.onRemoteUndo = () {
+      setState(() { if (_strokes.isNotEmpty) _strokes.removeLast(); });
+    };
+    session.onRemoteClear = () {
+      setState(() { _strokes.clear(); _remoteStrokes.clear(); });
+    };
+    session.onRemoteTextUpdate = (text, user) {
+      _contentCtrl.text = text;
+      _showToast('$user 텍스트 편집');
+    };
+    session.onUserJoined = (user) => _showToast('$user 입장');
+    session.onUserLeft = (user) => _showToast('$user 퇴장');
+    session.onInit = (strokes, text) {
+      setState(() {
+        _remoteStrokes = strokes.map((s) => DrawingStroke.fromMap(s)).toList();
+        if (text.isNotEmpty) _contentCtrl.text = text;
+      });
+      _liveStatus = '${session.participants.length}명 연결됨';
+    };
+
+    bool ok;
+    if (result == 'create') {
+      final code = await session.createRoom();
+      ok = await session.joinRoom(code, nameCtrl.text);
+      if (ok) _showToast('방 생성됨: $code (코드 복사됨)\n친구에게 공유하세요!');
+      Clipboard.setData(ClipboardData(text: code));
+    } else {
+      ok = await session.joinRoom(codeCtrl.text, nameCtrl.text);
+      if (ok) _showToast('연결됨!');
+    }
+
+    setState(() { _liveStatus = ok ? '${session.participants.length}명 연결됨' : ''; });
+  }
+
+  void _showToast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
   @override
   Widget build(BuildContext context) {
     final dark = context.watch<NoteService>().globalDarkMode;
+    final liveConnected = _liveSession?.connected ?? false;
 
     return Scaffold(
       backgroundColor: dark ? const Color(0xFF1A1A1A) : Colors.white,
@@ -155,143 +224,99 @@ class _EditorScreenState extends State<EditorScreen> {
         elevation: 0,
         leading: IconButton(
           icon: Icon(Icons.arrow_back, color: dark ? Colors.white : Colors.black),
-          onPressed: () { _saveNote(); Navigator.pop(context); },
+          onPressed: () { _saveNote(); _liveSession?.leaveRoom(); Navigator.pop(context); },
         ),
-        title: const Text(''),
+        title: liveConnected
+            ? Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: 8, height: 8, decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle)),
+                const SizedBox(width: 6),
+                Text(_liveStatus, style: TextStyle(fontSize: 14, color: dark ? Colors.white : Colors.black)),
+              ])
+            : const Text(''),
         actions: [
-          IconButton(icon: const Icon(Icons.people_outline, color: Colors.black), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LiveShareScreen()))),
-          IconButton(icon: Icon(widget.note.isPinned ? Icons.push_pin : Icons.push_pin_outlined, color: Colors.black), onPressed: () {}),
+          IconButton(
+            icon: Icon(liveConnected ? Icons.people : Icons.people_outline, color: liveConnected ? Colors.green : (dark ? Colors.white : Colors.black)),
+            onPressed: liveConnected ? () { _liveSession?.leaveRoom(); setState(() => _liveStatus = ''); _showToast('공유 종료'); } : _startLiveShare,
+          ),
           PopupMenuButton(
             icon: Icon(Icons.more_vert, color: dark ? Colors.white : Colors.black),
             itemBuilder: (ctx) => [
               PopupMenuItem(child: const Text('삭제'), onTap: _confirmDelete),
               PopupMenuItem(child: const Text('공유'), onTap: _shareNote),
-              PopupMenuItem(child: const Text('PDF로 저장'), onTap: _exportPDF),
+              PopupMenuItem(child: const Text('PDF로 저장'), onTap: () {}),
             ],
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: TextField(
-              controller: _titleCtrl,
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: dark ? Colors.white : Colors.black),
-              decoration: InputDecoration(hintText: '제목', border: InputBorder.none, hintStyle: TextStyle(color: dark ? Colors.grey[600] : Colors.grey[400])),
-              onChanged: (_) => _saveNote(),
-            ),
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: TextField(
+            controller: _titleCtrl,
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: dark ? Colors.white : Colors.black),
+            decoration: InputDecoration(hintText: '제목', border: InputBorder.none, hintStyle: TextStyle(color: dark ? Colors.grey[600] : Colors.grey[400])),
+            onChanged: (_) => _saveNote(),
           ),
-          Divider(height: 1, color: dark ? Colors.grey[800] : Colors.grey[200]),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-            child: Row(children: [
-              Icon(Icons.folder_outlined, size: 16, color: dark ? Colors.grey[500] : Colors.grey),
-              const SizedBox(width: 4),
-              Text(_selectedFolder, style: TextStyle(color: dark ? Colors.grey[500] : Colors.grey, fontSize: 13)),
-              const Spacer(),
-              Text('${_contentCtrl.text.length}자', style: TextStyle(color: dark ? Colors.grey[500] : Colors.grey, fontSize: 12)),
-            ]),
-          ),
-          Divider(height: 1, color: dark ? Colors.grey[800] : Colors.grey[200]),
-          Expanded(child: _showDrawing ? _buildDrawingEditor() : _buildRichTextEditor(dark)),
-          _buildBottomToolbar(dark),
-        ],
-      ),
+        ),
+        Divider(height: 1, color: dark ? Colors.grey[800] : Colors.grey[200]),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          child: Row(children: [
+            Icon(Icons.folder_outlined, size: 16, color: dark ? Colors.grey[500] : Colors.grey),
+            const SizedBox(width: 4),
+            Text(_selectedFolder, style: TextStyle(color: dark ? Colors.grey[500] : Colors.grey, fontSize: 13)),
+            const Spacer(),
+            if (liveConnected)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: Colors.green.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                child: const Text('LIVE', style: TextStyle(color: Colors.green, fontSize: 11, fontWeight: FontWeight.bold)),
+              ),
+            const SizedBox(width: 8),
+            Text('${_contentCtrl.text.length}자', style: TextStyle(color: dark ? Colors.grey[500] : Colors.grey, fontSize: 12)),
+          ]),
+        ),
+        Divider(height: 1, color: dark ? Colors.grey[800] : Colors.grey[200]),
+        Expanded(
+          child: _showDrawing
+              ? Stack(children: [
+                  DrawingCanvas(
+                    strokes: _strokes,
+                    onStrokesChanged: (s) {
+                      _strokes = s;
+                      if (liveConnected && s.isNotEmpty) _liveSession?.sendStroke(s.last.toMap());
+                    },
+                  ),
+                  if (_remoteStrokes.isNotEmpty)
+                    IgnorePointer(
+                      child: CustomPaint(
+                        painter: RemoteStrokePainter(_remoteStrokes),
+                        size: Size.infinite,
+                      ),
+                    ),
+                ])
+              : _buildRichTextEditor(dark),
+        ),
+        _buildBottomToolbar(dark),
+      ]),
     );
   }
 
   Widget _buildRichTextEditor(bool dark) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: SingleChildScrollView(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // 콘텐츠 파싱해서 표시
-          ..._contentCtrl.text.split('\n').map((line) {
-            if (line.startsWith('[IMG:')) {
-              final path = line.substring(5, line.length - 1);
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.file(File(path), fit: BoxFit.contain),
-                ),
-              );
-            }
-            if (line.startsWith('[PDF:')) {
-              final path = line.substring(5, line.length - 1);
-              return Card(
-                child: ListTile(
-                  leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
-                  title: Text(path.split('/').last),
-                  subtitle: const Text('터치하여 열기'),
-                  onTap: () {},
-                ),
-              );
-            }
-            if (line.startsWith('[REC:')) {
-              final path = line.substring(5, line.length - 1);
-              return Card(
-                child: ListTile(
-                  leading: const Icon(Icons.play_circle, color: Colors.blue),
-                  title: const Text('녹음'),
-                  subtitle: const Text('터치하여 재생'),
-                  onTap: () => _playAudio(path),
-                ),
-              );
-            }
-            // 리치텍스트 변환
-            String display = line;
-            display = display.replaceAllMapped(RegExp(r'\[B\](.*?)\[/B\]'), (m) => '**${m[1]}**');
-            display = display.replaceAllMapped(RegExp(r'\[I\](.*?)\[/I\]'), (m) => '*${m[1]}*');
-            display = display.replaceAllMapped(RegExp(r'\[U\](.*?)\[/U\]'), (m) => '__${m[1]}__');
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: RichText(
-                text: _parseMarkdown(display, dark),
-              ),
-            );
-          }),
-          // 실제 입력 필드
-          TextField(
-            controller: _contentCtrl,
-            maxLines: null,
-            style: TextStyle(fontSize: 16, height: 1.6, color: dark ? Colors.white : Colors.black),
-            decoration: InputDecoration(
-              hintText: '노트를 작성하세요...',
-              border: InputBorder.none,
-              hintStyle: TextStyle(color: dark ? Colors.grey[600] : Colors.grey[400]),
-            ),
-            onChanged: (_) => _saveNote(),
-          ),
-        ]),
+      child: TextField(
+        controller: _contentCtrl,
+        maxLines: null, expands: true,
+        textAlignVertical: TextAlignVertical.top,
+        style: TextStyle(fontSize: 16, height: 1.6, color: dark ? Colors.white : Colors.black),
+        decoration: InputDecoration(hintText: '노트를 작성하세요...', border: InputBorder.none, hintStyle: TextStyle(color: dark ? Colors.grey[600] : Colors.grey[400])),
+        onChanged: (v) {
+          _saveNote();
+          if (_liveSession?.connected ?? false) _liveSession?.sendTextUpdate(v);
+        },
       ),
     );
-  }
-
-  TextSpan _parseMarkdown(String text, bool dark) {
-    final color = dark ? Colors.white : Colors.black;
-    final spans = <TextSpan>[];
-    final regex = RegExp(r'(\*\*.*?\*\*|\*.*?\*|__.*?__)');
-    int last = 0;
-    for (final m in regex.allMatches(text)) {
-      if (m.start > last) spans.add(TextSpan(text: text.substring(last, m.start), style: TextStyle(color: color)));
-      final match = m.group(0)!;
-      if (match.startsWith('**')) {
-        spans.add(TextSpan(text: match.substring(2, match.length - 2), style: TextStyle(fontWeight: FontWeight.bold, color: color)));
-      } else if (match.startsWith('__')) {
-        spans.add(TextSpan(text: match.substring(2, match.length - 2), style: TextStyle(decoration: TextDecoration.underline, color: color)));
-      } else {
-        spans.add(TextSpan(text: match.substring(1, match.length - 1), style: TextStyle(fontStyle: FontStyle.italic, color: color)));
-      }
-      last = m.end;
-    }
-    if (last < text.length) spans.add(TextSpan(text: text.substring(last), style: TextStyle(color: color)));
-    return TextSpan(children: spans);
-  }
-
-  Widget _buildDrawingEditor() {
-    return DrawingCanvas(strokes: _strokes, onStrokesChanged: (s) => _strokes = s);
   }
 
   Widget _buildBottomToolbar(bool dark) {
@@ -301,9 +326,9 @@ class _EditorScreenState extends State<EditorScreen> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
           child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _tbBtn(Icons.format_bold, '굵게', dark, onTap: () { _isBold = !_isBold; _applyFormat('B'); }),
-            _tbBtn(Icons.format_italic, '기울임', dark, onTap: () { _isItalic = !_isItalic; _applyFormat('I'); }),
-            _tbBtn(Icons.format_underlined, '밑줄', dark, onTap: () { _isUnderline = !_isUnderline; _applyFormat('U'); }),
+            _tbBtn(Icons.format_bold, '굵게', dark, onTap: () => _applyFormat('B')),
+            _tbBtn(Icons.format_italic, '기울임', dark, onTap: () => _applyFormat('I')),
+            _tbBtn(Icons.format_underlined, '밑줄', dark, onTap: () => _applyFormat('U')),
             _tbBtn(Icons.format_list_bulleted, '목록', dark),
             Container(width: 1, height: 24, color: Colors.grey[600]),
             _tbBtn(_showDrawing ? Icons.text_fields : Icons.draw, _showDrawing ? '텍스트' : '그리기', dark, onTap: () => setState(() => _showDrawing = !_showDrawing)),
@@ -329,4 +354,27 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
   }
+}
+
+class RemoteStrokePainter extends CustomPainter {
+  final List<DrawingStroke> strokes;
+  RemoteStrokePainter(this.strokes);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final s in strokes) {
+      if (s.points.length < 2) continue;
+      final paint = Paint()
+        ..color = s.color.withOpacity(0.6)
+        ..strokeWidth = s.width
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke;
+      final path = Path()..moveTo(s.points[0].dx, s.points[0].dy);
+      for (var i = 1; i < s.points.length; i++) path.lineTo(s.points[i].dx, s.points[i].dy);
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant RemoteStrokePainter old) => strokes != old.strokes;
 }
