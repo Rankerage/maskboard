@@ -8,7 +8,7 @@ import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/note.dart';
-import '../widgets/drawing_canvas.dart';
+import '../widgets/full_drawing_canvas.dart';
 import '../services/live_session.dart';
 import 'live_share_screen.dart';
 
@@ -27,6 +27,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _showDrawing = false;
   List<DrawingStroke> _strokes = [];
   List<DrawingStroke> _remoteStrokes = [];
+  MaskLayer _maskLayer = MaskLayer();
   final Map<String, List<Offset>> _remotePoints = {};
   final Map<String, Color> _remoteStrokeColors = {};
   final Map<String, double> _remoteStrokeWidths = {};
@@ -305,18 +306,18 @@ class _EditorScreenState extends State<EditorScreen> {
         Expanded(
           child: _showDrawing
               : Stack(children: [
-                  DrawingCanvas(
+                  FullDrawingCanvas(
                     strokes: _strokes,
-                    onStrokesChanged: (s) {
-                      _strokes = s;
-                      if (liveConnected && s.isNotEmpty) _liveSession?.sendStrokeEnd(s.last.toMap()['points'].toString().split(';').length.toString());
-                    },
+                    onStrokesChanged: (s) { _strokes = s; },
                     onStrokeUpdated: (stroke, strokeId) {
                       if (liveConnected) {
                         final p = stroke.points.first;
                         _liveSession?.sendPoint(p.dx, p.dy, strokeId, stroke.color, stroke.width, stroke.tool.name);
                       }
                     },
+                    maskLayer: _maskLayer,
+                    onMaskChanged: (m) => _maskLayer = m,
+                    showMaskTools: true,
                   ),
                   // 원격 미완료 포인트 + 완료된 획 렌더링
                   if (_remotePoints.isNotEmpty || _remoteStrokes.isNotEmpty)
