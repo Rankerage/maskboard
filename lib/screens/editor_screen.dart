@@ -27,6 +27,9 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _showDrawing = false;
   List<DrawingStroke> _strokes = [];
   List<DrawingStroke> _remoteStrokes = [];
+  final Map<String, List<Offset>> _remotePoints = {};
+  final Map<String, Color> _remoteStrokeColors = {};
+  final Map<String, double> _remoteStrokeWidths = {};
   final ImagePicker _imagePicker = ImagePicker();
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
@@ -170,9 +173,31 @@ class _EditorScreenState extends State<EditorScreen> {
     final session = LiveSession();
     _liveSession = session;
 
-    session.onRemoteStroke = (stroke, user) {
-      setState(() { _remoteStrokes.add(DrawingStroke.fromMap(stroke)); });
-      _showToast('$user 필기');
+    session.onRemotePoint = (x, y, user, strokeId) {
+      setState(() {
+        // 진행 중인 원격 획에 포인트 추가
+        final existing = _remotePoints[strokeId];
+        if (existing != null) {
+          existing.add(Offset(x, y));
+        } else {
+          _remotePoints[strokeId] = [Offset(x, y)];
+        }
+      });
+    };
+    session.onRemoteStrokeEnd = (strokeId, user) {
+      setState(() {
+        final pts = _remotePoints.remove(strokeId);
+        if (pts != null && pts.length > 0) {
+          _remoteStrokes.add(DrawingStroke(
+            points: pts,
+            color: _remoteStrokeColors[strokeId] ?? Colors.red,
+            width: _remoteStrokeWidths[strokeId] ?? 2.0,
+            tool: DrawingTool.pen,
+          ));
+          _remoteStrokeColors.remove(strokeId);
+          _remoteStrokeWidths.remove(strokeId);
+        }
+      });
     };
     session.onRemoteUndo = () {
       setState(() { if (_strokes.isNotEmpty) _strokes.removeLast(); });
@@ -279,18 +304,25 @@ class _EditorScreenState extends State<EditorScreen> {
         Divider(height: 1, color: dark ? Colors.grey[800] : Colors.grey[200]),
         Expanded(
           child: _showDrawing
-              ? Stack(children: [
+              : Stack(children: [
                   DrawingCanvas(
                     strokes: _strokes,
                     onStrokesChanged: (s) {
                       _strokes = s;
-                      if (liveConnected && s.isNotEmpty) _liveSession?.sendStroke(s.last.toMap());
+                      if (liveConnected && s.isNotEmpty) _liveSession?.sendStrokeEnd(s.last.toMap()['points'].toString().split(';').length.toString());
+                    },
+                    onStrokeUpdated: (stroke, strokeId) {
+                      if (liveConnected) {
+                        final p = stroke.points.first;
+                        _liveSession?.sendPoint(p.dx, p.dy, strokeId, stroke.color, stroke.width, stroke.tool.name);
+                      }
                     },
                   ),
-                  if (_remoteStrokes.isNotEmpty)
+                  // 원격 미완료 포인트 + 완료된 획 렌더링
+                  if (_remotePoints.isNotEmpty || _remoteStrokes.isNotEmpty)
                     IgnorePointer(
                       child: CustomPaint(
-                        painter: RemoteStrokePainter(_remoteStrokes),
+                        painter: RemoteLivePainter(_remoteStrokes, _remotePoints),
                         size: Size.infinite,
                       ),
                     ),
@@ -356,25 +388,62 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 }
 
-class RemoteStrokePainter extends CustomPainter {
+class RemoteLivePainter extends CustomPainter {
   final List<DrawingStroke> strokes;
-  RemoteStrokePainter(this.strokes);
+  final Map<String, List<Offset>> activePoints;
+
+  RemoteLivePainter(this.strokes, this.activePoints);
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 완료된 획
     for (final s in strokes) {
       if (s.points.length < 2) continue;
       final paint = Paint()
-        ..color = s.color.withOpacity(0.6)
+        ..color = s.color.withOpacity(0.5)
         ..strokeWidth = s.width
         ..strokeCap = StrokeCap.round
-        ..style = PaintingStyle.stroke;
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke
+        ..isAntiAlias = true
+        ..filterQuality = FilterQuality.high;
       final path = Path()..moveTo(s.points[0].dx, s.points[0].dy);
-      for (var i = 1; i < s.points.length; i++) path.lineTo(s.points[i].dx, s.points[i].dy);
+      for (var i = 1; i < s.points.length; i++) {
+        final mid = Offset((s.points[i].dx + (i+1 < s.points.length ? s.points[i+1].dx : s.points[i].dx)) / 2,
+                           (s.points[i].dy + (i+1 < s.points.length ? s.points[i+1].dy : s.points[i].dy)) / 2);
+        path.quadraticBezierTo(s.points[i].dx, s.points[i].dy, mid.dx, mid.dy);
+      }
+      canvas.drawPath(path, paint);
+    }
+    
+    // 진행 중인 포인트들 (실시간 스트리밍)
+    for (final pts in activePoints.values) {
+      if (pts.length < 2) {
+        // 단일 포인트는 점으로
+        if (pts.isNotEmpty) {
+          final p = pts.first;
+          final paint = Paint()..color = Colors.red.withOpacity(0.5)..strokeWidth = 3..strokeCap = StrokeCap.round..style = PaintingStyle.stroke;
+          canvas.drawCircle(p, 2, paint);
+        }
+        continue;
+      }
+      final paint = Paint()
+        ..color = Colors.red.withOpacity(0.4)
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke
+        ..isAntiAlias = true;
+      final path = Path()..moveTo(pts[0].dx, pts[0].dy);
+      for (var i = 1; i < pts.length - 1; i++) {
+        final mid = Offset((pts[i].dx + pts[i + 1].dx) / 2, (pts[i].dy + pts[i + 1].dy) / 2);
+        path.quadraticBezierTo(pts[i].dx, pts[i].dy, mid.dx, mid.dy);
+      }
+      if (pts.length > 1) path.lineTo(pts.last.dx, pts.last.dy);
       canvas.drawPath(path, paint);
     }
   }
 
   @override
-  bool shouldRepaint(covariant RemoteStrokePainter old) => strokes != old.strokes;
+  bool shouldRepaint(covariant RemoteLivePainter old) => activePoints != old.activePoints || strokes != old.strokes;
 }

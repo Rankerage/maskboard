@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -12,10 +11,11 @@ class LiveSession extends ChangeNotifier {
   List<String> _participants = [];
   String _sharedText = '';
 
-  // 실시간 콜백
-  void Function(Map<String, dynamic> stroke, String user)? onRemoteStroke;
-  void Function()? onRemoteUndo;
-  void Function()? onRemoteClear;
+  // 실시간 콜백 - 포인트 단위로
+  void Function(double x, double y, String user, String strokeId)? onRemotePoint;
+  void Function(String strokeId, String user)? onRemoteStrokeEnd;
+  void Function(String user)? onRemoteUndo;
+  void Function(String user)? onRemoteClear;
   void Function(String text, String user)? onRemoteTextUpdate;
   void Function(String user)? onUserJoined;
   void Function(String user)? onUserLeft;
@@ -48,19 +48,27 @@ class LiveSession extends ChangeNotifier {
           switch (msg['type']) {
             case 'init':
               _participants = List<String>.from(msg['users'] ?? []);
-              final strokes = msg['strokes'] != null ? List<Map<String, dynamic>>.from(msg['strokes']) : <Map<String, dynamic>>[];
               _sharedText = msg['text'] ?? '';
+              final strokes = msg['strokes'] != null ? List<Map<String, dynamic>>.from(msg['strokes']) : <Map<String, dynamic>>[];
               onInit?.call(strokes, _sharedText);
               notifyListeners();
               break;
-            case 'stroke':
-              onRemoteStroke?.call(msg['stroke'], msg['user'] ?? '');
+            case 'point':
+              onRemotePoint?.call(
+                (msg['x'] as num).toDouble(),
+                (msg['y'] as num).toDouble(),
+                msg['user'] ?? '',
+                msg['strokeId'] ?? '',
+              );
+              break;
+            case 'stroke_end':
+              onRemoteStrokeEnd?.call(msg['strokeId'] ?? '', msg['user'] ?? '');
               break;
             case 'undo':
-              onRemoteUndo?.call();
+              onRemoteUndo?.call(msg['user'] ?? '');
               break;
             case 'clear':
-              onRemoteClear?.call();
+              onRemoteClear?.call(msg['user'] ?? '');
               break;
             case 'text_update':
               _sharedText = msg['text'] ?? '';
@@ -91,9 +99,22 @@ class LiveSession extends ChangeNotifier {
     }
   }
 
-  void sendStroke(Map<String, dynamic> stroke) {
+  // 포인트 단위 전송
+  void sendPoint(double x, double y, String strokeId, Color color, double width, String tool) {
     if (!_connected) return;
-    _channel?.sink.add(jsonEncode({"type": "stroke", "stroke": stroke}));
+    _channel?.sink.add(jsonEncode({
+      "type": "point",
+      "x": x, "y": y,
+      "strokeId": strokeId,
+      "color": color.value,
+      "width": width,
+      "tool": tool,
+    }));
+  }
+
+  void sendStrokeEnd(String strokeId) {
+    if (!_connected) return;
+    _channel?.sink.add(jsonEncode({"type": "stroke_end", "strokeId": strokeId}));
   }
 
   void sendUndo() {
